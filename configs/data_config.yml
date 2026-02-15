@@ -1,0 +1,18 @@
+project:
+  name: "thesis-pedestrian-benchmark"
+  author: "Dhiaa Eddine Bahri"
+
+data:
+  raw_path: "data/raw"
+  sampling_rate: 0.4  # seconds per frame
+  t_obs: 8            # 3.2 seconds
+  t_pred: 12          # 4.8 seconds
+  sliding_step: 1     # window stride
+
+datasets:
+  eth: ["univ", "hotel"]
+  ucy: ["univ", "zara1", "zara2"]
+
+# Standard split used in Social-LSTM/GAN for Leave-One-Out
+evaluation:
+  test_set: "eth/hotel"
