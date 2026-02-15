@@ -22,6 +22,7 @@ class TrajectoryLoader:
 
 
 # Example Usage
-loader = TrajectoryLoader('data/raw')
-eth_univ = loader.load_scene('eth', 'univ')
-print(eth_univ.head())
+if __name__ == '__main__':
+    loader = TrajectoryLoader('data/raw')
+    eth_univ = loader.load_scene('eth', 'univ')
+    print(eth_univ.head())
