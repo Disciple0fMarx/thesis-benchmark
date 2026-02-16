@@ -16,3 +16,10 @@ datasets:
 # Standard split used in Social-LSTM/GAN for Leave-One-Out
 evaluation:
   test_set: "eth/hotel"
+
+training:
+  lr: 0.001
+  epochs: 50
+  batch_size: 64
+  checkpoint_dir: "results/checkpoints"
+  weight_decay: 1e-4
