@@ -11,6 +11,7 @@ env/
 data/raw/
 data/processed/
 data/annotations/
+results/
 *.pt
 *.pth
 *.h5
