@@ -7,27 +7,29 @@ class SocialGCN(nn.Module):
         super(SocialGCN, self).__init__()
         self.W = nn.Linear(in_channels, out_channels)
 
+        # NEW: Projection layer to match dimensions for the residual connection
+        self.residual_project = nn.Linear(in_channels, out_channels)
+
     def forward(self, v, a):
-        """
-        Args:
-            v: Node features [Num_Peds, T, In_Channels]
-            a: Adjacency Matrix [Num_Peds, Num_Peds]
-        """
-        # v is [N, T, C]. We want to multiply A [N, N] by V [N, T, C]
-        # We need to treat T as a batch dimension for matmul.
-        # Permute v to [T, N, C] so matmul can broadcast across T
-        v = v.permute(1, 0, 2) 
+        # 1. Add Self-loops (Identity matrix) so a ped always listens to themselves
+        I = torch.eye(a.size(0)).to(a.device)
+        a_hat = a + I 
         
-        # Now: [T, N, N] matmul [T, N, C] -> [T, N, C]
-        # (a is automatically broadcasted across T)
-        out = torch.matmul(a, v)
+        # 2. Normalize the Adjacency (Standard GCN trick)
+        # This prevents the signal from "exploding" in crowded scenes
+        degree = torch.sum(a_hat, dim=1)
+        d_inv = torch.diag(torch.pow(degree, -0.5))
+        a_norm = d_inv @ a_hat @ d_inv
         
-        # Permute back to [N, T, C]
-        out = out.permute(1, 0, 2)
-        
-        # Apply the linear weight
+        v_perm = v.permute(1, 0, 2) 
+        out = torch.matmul(a_norm, v_perm)
+        out = out.permute(1, 0, 2).contiguous()
         out = self.W(out)
-        return out
+
+        # 3. Residual branch (Project v from 2 channels to 64)
+        res = self.residual_project(v)
+        
+        return out + res
 
 
 class STGCNN(nn.Module):
@@ -54,32 +56,29 @@ class STGCNN(nn.Module):
             if isinstance(m, nn.Linear) or isinstance(m, nn.Conv1d):
                 nn.init.xavier_normal_(m.weight)
 
-    def forward(self, obs_list, adj_list):
-        """
-        Processes a list of scene tensors.
-        """
+    def forward(self, obs_norm, obs_rel, k=20):
         pred_list = []
-        for obs, adj in zip(obs_list, adj_list):
-            # 1. Convert absolute to relative: obs[:, 1:] - obs[:, :-1]
-            # This makes the first frame the "origin" for every pedestrian
-            last_obs_pos = obs[:, -1:, :] 
-            rel_obs = torch.zeros_like(obs)
-            rel_obs[:, 1:, :] = obs[:, 1:, :] - obs[:, :-1, :]
+        for obs, rel in zip(obs_norm, obs_rel):
+            # 1. Use relative motion as features
+            # Standard STGCNN uses a graph over all peds in the scene
+            # Here we simplify: use the last frame's spatial distance for Adjacency
+            dist_mat = torch.cdist(obs[:, -1, :], obs[:, -1, :])
+            adj = (dist_mat < 2.0).float().to(obs.device) # 2-meter social threshold
             
-            # 2. Process through GCN (using relative motion)
-            a = adj[-1] 
-            x = torch.relu(self.gcn(rel_obs, a)) 
-            x = x.permute(0, 2, 1) 
-            x = torch.relu(self.temporal_cnn(x)) 
-            x = self.time_extrapolator(x) 
-            x = x.permute(0, 2, 1)
+            v = torch.relu(self.gcn(rel, adj))
+            v = v.permute(0, 2, 1)
+            v = torch.relu(self.temporal_cnn(v))
+            v = self.time_extrapolator(v).permute(0, 2, 1)
             
-            # 3. Model predicts relative displacements for the future
-            rel_pred = self.fc(x) 
+            # 2. To get K samples, we can add a small stochastic noise to the bottleneck
+            # or use a dropout layer during inference.
+            base_rel_pred = self.fc(v) # [N, T_pred, 2]
             
-            # 4. Convert back to absolute for evaluation
-            # Current_pos = Last_Obs + cumulative sum of predicted deltas
-            abs_pred = last_obs_pos + torch.cumsum(rel_pred, dim=1)
-            pred_list.append(abs_pred)
+            k_samples = []
+            for _ in range(k):
+                noise = torch.randn_like(base_rel_pred) * 0.05 # 5cm variance noise
+                k_samples.append(base_rel_pred + noise)
+            
+            pred_list.append(torch.stack(k_samples))
             
         return pred_list
