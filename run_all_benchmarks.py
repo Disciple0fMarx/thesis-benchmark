@@ -1,44 +1,80 @@
+import yaml
 import torch
 import pandas as pd
-import yaml
-from src.models import ConstantVelocityModel, STGCNN, SocialLSTM
+from torch.utils.data import DataLoader
+from src.data_pipeline.loader import TrajectoryLoader
+from src.data_pipeline.sequence_generator import SocialSequenceGenerator
+from src.data_pipeline.dataset import SocialDataset, social_collate
+from src.models.social_lstm import SocialLSTM
+from src.models.stgcnn import STGCNN
+from src.training.trainer import Trainer
 from src.evaluation.evaluator import Evaluator
 
+# 1. Setup & Config
+with open('configs/data_config.yml', 'r') as f:
+    config = yaml.safe_load(f)
 
-def run_benchmarks(test_scene=('eth', 'univ')):
-    with open('configs/data_config.yml', 'r') as f:
-        config = yaml.safe_load(f)
+scenes = [
+    ('eth', 'univ'), 
+    ('eth', 'hotel'), 
+    ('ucy', 'univ'), 
+    ('ucy', 'zara1'), 
+    ('ucy', 'zara2')
+]
+
+loader = TrajectoryLoader(config['data']['raw_path'])
+generator = SocialSequenceGenerator(obs_len=8, pred_len=12)
+
+# Choose your model: "LSTM" or "STGCNN"
+MODEL_TYPE = "STGCNN" 
+
+results = []
+
+# 2. Leave-One-Out Loop
+for i, test_scene in enumerate(scenes):
+    train_scenes = [s for j, s in enumerate(scenes) if i != j]
+    print(f"\n🚀 Benchmarking {MODEL_TYPE} | Test Scene: {test_scene[1].upper()}")
+    print(f"Training on: {[s[1] for s in train_scenes]}")
+
+    # Datasets
+    train_dataset = SocialDataset(train_scenes, loader, generator, config)
+    test_dataset = SocialDataset([test_scene], loader, generator, config)
     
-    # Configuration
-    models_to_test = {
-        "CVM": ConstantVelocityModel(pred_len=12),
-        "STGCNN": STGCNN(obs_len=8, pred_len=12),
-        "Social-LSTM": SocialLSTM(obs_len=8, pred_len=12)
-    }
+    train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], 
+                              shuffle=True, collate_fn=social_collate)
+    test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=social_collate)
+
+    # Initialize Model
+    if MODEL_TYPE == "LSTM":
+        model = SocialLSTM(obs_len=8, pred_len=12, hidden_dim=64)
+    else:
+        model = STGCNN(obs_len=8, pred_len=12)
+
+    trainer = Trainer(model, config)
+    evaluator = Evaluator(model, config)
+
+    # Train
+    for epoch in range(config['training']['epochs']):
+        _ = trainer.train_epoch(train_loader)
     
-    # Load trained weights for DL models
-    # (Assuming you've saved them as stgcnn_final.pth and lstm_final.pth)
-    try:
-        models_to_test["STGCNN"].load_state_dict(torch.load('results/checkpoints/stgcnn_hotel.pth'))
-        models_to_test["Social-LSTM"].load_state_dict(torch.load('results/checkpoints/lstm_hotel.pth'))
-    except:
-        print("⚠️ DL weights not found, running with random initialization for demo.")
+    # Final Evaluation
+    metrics = evaluator.evaluate(test_loader)
+    print(f"✅ Result for {test_scene[1]}: ADE: {metrics['ADE']:.3f}, FDE: {metrics['FDE']:.3f}")
+    
+    results.append({
+        'Scene': test_scene[1],
+        'ADE': round(metrics['ADE'], 3),
+        'FDE': round(metrics['FDE'], 3)
+    })
 
-    results_table = []
+# 3. Final Table Generation
+df = pd.DataFrame(results)
+avg_ade = df['ADE'].mean()
+avg_fde = df['FDE'].mean()
+df.loc[len(df)] = {'Scene': 'AVERAGE', 'ADE': avg_ade, 'FDE': avg_fde}
 
-    for name, model in models_to_test.items():
-        evaluator = Evaluator(model, config)
-        metrics = evaluator.evaluate(test_loader)
-        results_table.append({
-            "Model": name,
-            "ADE": round(metrics['ADE'], 4),
-            "FDE": round(metrics['FDE'], 4)
-        })
-
-    df = pd.DataFrame(results_table)
-    print("\n📝 FINAL BENCHMARK TABLE")
-    print(df.to_markdown(index=False))
-    return df
-
-# Run it
-run_benchmarks()
+print("\n" + "="*30)
+print(f"FINAL {MODEL_TYPE} BENCHMARK RESULTS")
+print("="*30)
+print(df.to_string(index=False))
+df.to_csv(f"results/{MODEL_TYPE.lower()}_benchmark.csv", index=False)
