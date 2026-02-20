@@ -71,3 +71,62 @@ class Trainer:
     def save_model(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({'state_dict': self.model.state_dict(), 'config': self.config}, path)
+
+
+class GANTrainer:
+    def __init__(self, generator, discriminator, config):
+        self.gen = generator
+        self.disc = discriminator
+        self.config = config
+        
+        self.opt_g = torch.optim.Adam(self.gen.parameters(), lr=config['training']['lr'])
+        self.opt_d = torch.optim.Adam(self.disc.parameters(), lr=config['training']['lr'])
+        
+        self.criterion = nn.BCELoss() # For GAN loss
+        self.l2_loss = nn.MSELoss()  # For Variety (L2) loss
+
+    def train_epoch(self, loader):
+        self.gen.train()
+        self.disc.train()
+        
+        for batch in loader:
+            obs_rel = [r.to(self.device) for r in batch['obs_rel']]
+            pred_rel = [p.to(self.device) for p in batch['pred_rel']]
+            
+            for obs_r, target_r in zip(obs_rel, pred_rel):
+                # --- 1. Train Discriminator ---
+                self.opt_d.zero_grad()
+                
+                # Real Trajectories
+                real_traj = torch.cat([obs_r, target_r], dim=1)
+                real_label = torch.ones(real_traj.size(0), 1).to(self.device)
+                prob_real = self.disc(real_traj)
+                loss_d_real = self.criterion(prob_real, real_label)
+                
+                # Fake Trajectories
+                # We only take the 'best' of K samples to keep it stable
+                fake_pred_list = self.gen([None], [obs_r], k=1) # Single sample for D update
+                fake_traj = torch.cat([obs_r, fake_pred_list[0][0]], dim=1)
+                fake_label = torch.zeros(fake_traj.size(0), 1).to(self.device)
+                prob_fake = self.disc(fake_traj.detach()) # Detach so G isn't updated
+                loss_d_fake = self.criterion(prob_fake, fake_label)
+                
+                loss_d = loss_d_real + loss_d_fake
+                loss_d.backward()
+                self.opt_d.step()
+
+                # --- 2. Train Generator (Variety Loss + Adversarial) ---
+                self.opt_g.zero_grad()
+                
+                # Variety Loss (Best of K)
+                k_samples = self.gen([None], [obs_r], k=self.config['training']['k'])
+                # (Logic to find best sample and calc L2 loss goes here, same as previous Trainer)
+                loss_variety = self.calculate_variety_loss(k_samples[0], target_r)
+                
+                # Adversarial Loss (Trick D into thinking Fake is Real)
+                prob_fake_for_g = self.disc(fake_traj)
+                loss_adv = self.criterion(prob_fake_for_g, real_label)
+                
+                loss_g = loss_variety + 0.1 * loss_adv # Weighting the GAN influence
+                loss_g.backward()
+                self.opt_g.step()
