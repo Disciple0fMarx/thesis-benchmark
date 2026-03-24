@@ -192,12 +192,12 @@ class TrajectoryLoader:
         return data
 
     @staticmethod
-    def _load_h_matrix(self, scene_path):
+    def _load_h_matrix(scene_dir: str):
         """
         Load the 3×3 homography matrix (H.txt) if present.
         Returns None when the file is absent — callers must handle this.
         """
-        h_path = os.path.join(scene_path, 'H.txt')
+        h_path = os.path.join(scene_dir, 'H.txt')
         if os.path.exists(h_path):
             return np.loadtxt(h_path)
         return None

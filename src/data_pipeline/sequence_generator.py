@@ -151,6 +151,12 @@ class SocialSequenceGenerator:
             # across windows, which matters when debugging and for any model
             # that relies on consistent agent indexing across time.
             valid_ids_sorted = sorted(valid_ids)
+
+            max_peds = getattr(self, 'max_peds', None)
+            if max_peds is not None:
+                valid_ids_sorted = valid_ids_sorted[:max_peds]
+
+            # valid_ids_sorted = valid_ids_sorted[:2]  # cap at 2 agents, matching authors 
  
             peds_traj = []
             for ped_id in valid_ids_sorted:
