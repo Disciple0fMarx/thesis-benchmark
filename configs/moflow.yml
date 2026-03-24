@@ -1,0 +1,138 @@
+# configs/moflow.yml
+#
+# Hyperparameters for MoFlow teacher and IMLE student training on ETH-UCY.
+#
+# These match the authors' ETH-UCY configuration as closely as possible.
+# See: Fu et al., CVPR 2025 (https://github.com/DSL-Lab/MoFlow)
+#
+# Usage
+# -----
+# Both train_moflow_teacher.py and train_moflow_imle.py load this file.
+# Override any value at the command line with --override key=value, e.g.:
+#     python train_moflow_teacher.py --subset eth --override training.lr=5e-5
+
+# ---------------------------------------------------------------------------
+# Data pipeline
+# ---------------------------------------------------------------------------
+data:
+  obs_len:  8       # observed frames  (3.2 s at 2.5 Hz)
+  pred_len: 12      # future frames    (4.8 s at 2.5 Hz)
+  min_peds: 2       # minimum pedestrians per window
+  # max_peds: 2
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# Shared between teacher (ETHMotionTransformer) and student (ETHIMLETransformer).
+# The student uses the same architecture minus the flow-time conditioning.
+# ---------------------------------------------------------------------------
+model:
+  d_model:        128   # hidden dimension D
+  K:              20    # number of joint predictions
+  n_enc_heads:    4     # context encoder attention heads
+  n_enc_layers:   2     # context encoder transformer layers
+  n_dec_heads:    4     # motion decoder attention heads
+  n_dec_layers:   4     # motion decoder layers
+  ffn_multiplier: 4     # FFN hidden dim = d_model * ffn_multiplier
+  dropout:        0.1
+
+  # Flow-time dependent masking (teacher only).
+  # Zeros the noisy embedding with logistic probability near t=1 to prevent
+  # the model from cheating by copying y_t when it is close to x_1.
+  # Parameters from the paper (Appendix A.2): k=20, m=0.5
+  drop_logi_k:    20.0
+  drop_logi_m:    0.5
+
+# ---------------------------------------------------------------------------
+# Flow matching (teacher)
+# ---------------------------------------------------------------------------
+flow:
+  # Time schedule: logit-normal distribution.
+  # logit(t) ~ N(mean, std^2) -> t = sigmoid(logit(t))
+  # Parameters from paper (Appendix A.2): mean=-0.5, std=1.5
+  logit_norm_mean: -0.5
+  logit_norm_std:  1.5
+
+  # Tied noise: share one noise vector across all K components.
+  # Untied noise causes training instability (ablation Table 5 in paper).
+  tied_noise: true
+
+  # Input scaling: divide noisy input by sqrt(t^2 + (1-t)^2) before model.
+  # Keeps input variance near 1 throughout the denoising trajectory.
+  fm_in_scaling: true
+
+  # Winner-takes-all selection mode.
+  # 'scene': argmin over mean-agent error per scene (used in paper).
+  # 'agent': argmin per agent independently.
+  loss_nn_mode: scene
+
+  # Loss weights for regression and classification terms.
+  loss_weight_reg: 1.0
+  loss_weight_cls: 0.0 # 1.0
+
+# ---------------------------------------------------------------------------
+# IMLE student
+# ---------------------------------------------------------------------------
+imle:
+  # Chamfer distance weight.
+  chamfer_weight: 1.0
+
+  # Ground-truth supervision weight.
+  # Disabled (0.0) for ETH-UCY — matches authors' configuration.
+  # Can be enabled for harder scenes.
+  gt_weight: 0.0
+
+  # Reduction over the time dimension before computing Chamfer distance.
+  loss_reduction: mean
+
+  # M: number of student samples generated per noise draw.
+  # The nearest sample to the teacher is selected for backprop.
+  # Higher M = better coverage but larger memory footprint.
+  # Paper uses M=20; OOM with M=40 (Table 7).
+  num_to_gen: 20
+
+# ---------------------------------------------------------------------------
+# Teacher training
+# ---------------------------------------------------------------------------
+training:
+  lr:           1.0e-4
+  epochs:       200
+  batch_size:   32    # reduce if OOM; results are unaffected
+  clip:         1.0   # gradient norm clip
+  weight_decay: 0.01
+
+# ---------------------------------------------------------------------------
+# IMLE student training
+# (overrides the training section when running train_moflow_imle.py)
+# ---------------------------------------------------------------------------
+imle_training:
+  lr:           1.0e-4
+  epochs:       50
+  batch_size:   32    # MUST match sampling.batch_size
+  clip:         1.0
+  weight_decay: 1.0e-4
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+evaluation:
+  k_samples: 20   # K for minKADE / minKFDE
+
+  # Evaluate every N epochs during training.
+  # Each evaluation run is the full 100-step ODE on the test set.
+  # Increase this if evaluation is a bottleneck.
+  eval_every: 5 # 20
+
+  # ODE steps during evaluation (fewer = faster but noisier metrics).
+  ode_steps: 100 # 20
+
+# ---------------------------------------------------------------------------
+# Teacher sample generation (for IMLE)
+# ---------------------------------------------------------------------------
+sampling:
+  ode_steps:  100   # full quality; use 20 for quick debugging runs
+  batch_size: 32    # MUST match imle_training.batch_size
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+seed: 42
