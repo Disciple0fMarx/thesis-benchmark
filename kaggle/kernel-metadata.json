@@ -1,0 +1,16 @@
+{
+  "id": "dhyaelbahri/moflow-teacher-univ",
+  "title": "MoFlow Teacher univ",
+  "code_file": "kernel_run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "dhyaelbahri/eth-ucy-trajectories"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "total_votes": 0
+}
