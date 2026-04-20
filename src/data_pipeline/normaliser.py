@@ -32,9 +32,9 @@ class TrajectoryNormaliser:
         test_dataset.set_normaliser(trainer.normaliser)
     """
 
-    SUPPORTED_MODES = ('minmax',)
+    SUPPORTED_MODES = ('minmax', 'standard')
 
-    def __init__(self, mode: str = 'minmax'):
+    def __init__(self, mode: str = 'standard'):
         if mode not in self.SUPPORTED_MODES:
             raise ValueError(
                 f"Unknown normalisation mode '{mode}'. "
@@ -47,6 +47,9 @@ class TrajectoryNormaliser:
         # Stored as numpy arrays internally; converted to tensors on demand.
         self._min: np.ndarray | None = None   # [2]
         self._max: np.ndarray | None = None   # [2]
+
+        self._mean = None
+        self._std  = None
 
     # ------------------------------------------------------------------
     # Fitting
@@ -88,13 +91,22 @@ class TrajectoryNormaliser:
             for i, p in enumerate(dataset._pred)], axis=0
         )                                                  # [M, 2]
 
-        if self.mode == 'minmax':
-            self._min = all_coords.min(axis=0)             # [2]
-            self._max = all_coords.max(axis=0)             # [2]
+        if self.mode == 'standard':
+            self._mean = np.mean(all_coords, axis=(0, 1))
+            self._std = np.std(all_coords, axis=(0, 1))
+        elif self.mode == 'minmax':
+            # self._min = all_coords.min(axis=0)             # [2]
+            # self._max = all_coords.max(axis=0)             # [2]
+
+            # Use the absolute maximum displacement to create a symmetric boundary
+            # This ensures that a predicted 0.0 stays exactly at the last observed position.
+            abs_max = np.abs(all_coords).max(axis=0)
+            self._max = abs_max
+            self._min = -abs_max
 
             # Guard against degenerate cases (all identical coordinates).
-            range_ = self._max - self._min
-            if np.any(range_ < 1e-6):
+            # range_ = self._max - self._min
+            if np.any(self._max < 1e-6):
                 raise ValueError(
                     f"Degenerate coordinate range detected: min={self._min}, "
                     f"max={self._max}.  Check the training data."
@@ -123,9 +135,15 @@ class TrajectoryNormaliser:
         FloatTensor same shape as x, values in [-1, 1].
         """
         self._check_fitted()
-        x_min, x_max = self._bounds_as_tensors(x.device)
 
-        if self.mode == 'minmax':
+        if self.mode == 'standard':
+            # Use mean/std tensors
+            mu, sigma = self._stats_as_tensors(x.device)
+            return (x - mu) / (sigma + 1e-6)
+        else:
+            x_min, x_max = self._bounds_as_tensors(x.device)
+
+        # if self.mode == 'minmax':
             denom = (x_max - x_min).clamp(min=1e-6)
             return (x - x_min) / denom * 2.0 - 1.0
 
@@ -143,9 +161,14 @@ class TrajectoryNormaliser:
         FloatTensor same shape as x, in original coordinate units.
         """
         self._check_fitted()
-        x_min, x_max = self._bounds_as_tensors(x.device)
 
-        if self.mode == 'minmax':
+        if self.mode == 'standard':
+            mu, sigma = self._stats_as_tensors(x.device)
+            return x * sigma + mu
+        else:
+            x_min, x_max = self._bounds_as_tensors(x.device)
+
+        # if self.mode == 'minmax':
             denom = (x_max - x_min).clamp(min=1e-6)
             return (x + 1.0) / 2.0 * denom + x_min
 
@@ -188,8 +211,12 @@ class TrajectoryNormaliser:
         self._check_fitted()
         return {
             'mode': self.mode,
-            'min':  self._min.tolist(),
-            'max':  self._max.tolist(),
+            'min': self._min.tolist() if self._min is not None else None,
+            'max': self._max.tolist() if self._max is not None else None,
+            'mean': self._mean.tolist() if self._mean is not None else None,
+            'std': self._std.tolist() if self._std is not None else None,
+            # 'min':  self._min.tolist(),
+            # 'max':  self._max.tolist(),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -237,3 +264,9 @@ class TrajectoryNormaliser:
         x_min = torch.tensor(self._min, dtype=torch.float32, device=device)
         x_max = torch.tensor(self._max, dtype=torch.float32, device=device)
         return x_min, x_max
+
+    def _stats_as_tensors(self, device):
+        """Helper for standard mode"""
+        mu = torch.tensor(self._mean, dtype=torch.float32, device=device)
+        sigma = torch.tensor(self._std, dtype=torch.float32, device=device)
+        return mu, sigma

@@ -155,6 +155,37 @@ class TrajectoryLoader:
  
         return train_scenes
 
+    def load_split_scene(self, canonical_name: str, train_ratio: float = 0.7) -> tuple[dict, dict]:
+        """
+        Loads a single scene and splits it chronologically into train/test sets.
+        
+        Returns
+        -------
+        (train_scene, test_scene) : tuple of dicts
+        """
+        scene = self.load_scene(canonical_name)
+        df = scene['df']
+        
+        # Identify the unique frames and find the split point
+        unique_frames = sorted(df['frame'].unique())
+        split_idx = int(len(unique_frames) * train_ratio)
+        split_frame = unique_frames[split_idx]
+        
+        # Split the DataFrame chronologically
+        train_df = df[df['frame'] < split_frame].copy()
+        test_df  = df[df['frame'] >= split_frame].copy()
+        
+        # Create two scene dicts that the Dataset/Generator can understand
+        train_scene = scene.copy()
+        train_scene['df'] = train_df
+        train_scene['name'] = f"{canonical_name}_train"
+        
+        test_scene = scene.copy()
+        test_scene['df'] = test_df
+        test_scene['name'] = f"{canonical_name}_test"
+        
+        return train_scene, test_scene
+
     @staticmethod
     def _load_obsmat(path: str) -> pd.DataFrame:
         """
@@ -181,6 +212,14 @@ class TrajectoryLoader:
             usecols=[0, 1, 2, 4],  # frame, id, x, y
         )
         data.columns = ['frame', 'id', 'x', 'y']
+
+        if data['x'].abs().max() > 100: 
+            print(f"DEBUG: Large coordinates detected ({data['x'].max()}). Scaling to meters...")
+            # If you don't have a working H-matrix, 0.05 is the standard 'fallback' 
+            # for these datasets to bring pixels into a ~0-30m range.
+            data['x'] = data['x'] * 0.05
+            data['y'] = data['y'] * 0.05
+            
         data = data.astype({
             'frame': np.int64,
             'id':    np.int64,
