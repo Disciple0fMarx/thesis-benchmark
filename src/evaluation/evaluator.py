@@ -1,5 +1,10 @@
 import torch
-from src.evaluation.metrics import calculate_best_of_k
+from src.evaluation.metrics import (
+    calculate_best_of_k,
+    calculate_collision_rate,
+    calculate_psv,
+    calculate_distribution_metrics
+)
 from src.data_pipeline.dataset import SocialDataset
  
  
@@ -48,55 +53,117 @@ class Evaluator:
     def evaluate(self, data_loader) -> dict:
         """
         Run evaluation over a full test DataLoader.
- 
-        Metrics are averaged over pedestrians (not over scenes or batches).
-        Specifically, we accumulate the sum of per-pedestrian minimum errors
-        and the total pedestrian count across the entire test set, then divide
-        once at the end.  This matches the benchmark convention — reporting an
-        average over all 1,536 ETH-UCY pedestrians, not an average of
-        per-scene averages.
- 
-        Returns
-        -------
-        dict with keys 'ADE' and 'FDE' (float scalars).
+        Now includes Social (CR, PSV) and Uncertainty (AMD, AMV) metrics.
         """
         self.model.eval()
- 
-        # Accumulate sum of per-pedestrian min errors and total ped count.
-        # Dividing sum/count gives the correctly weighted mean regardless of
-        # how many pedestrians appear in each scene or batch.
-        ade_sum   = 0.0
-        fde_sum   = 0.0
+
+        # Accumulators for weighting by pedestrian count
+        metrics_sum = {
+            'ADE': 0.0, 'FDE': 0.0, 
+            'CR':  0.0, 'PSV': 0.0, 
+            'AMD': 0.0, 'AMV': 0.0
+        }
         ped_count = 0
- 
+
         with torch.no_grad():
             for batch in data_loader:
-                obs_list    = [o.to(self.device)    for o in batch['obs']]
-                obs_rel_list = [r.to(self.device)   for r in batch['obs_rel']]
-                target_list = [t.to(self.device)    for t in batch['pred']]
-                origin_list = [o.to(self.device)    for o in batch['origin']]
- 
-                # Forward pass — one scene at a time (variable N_peds per scene).
+                obs_list     = [o.to(self.device) for o in batch['obs']]
+                obs_rel_list = [r.to(self.device) for r in batch['obs_rel']]
+                target_list  = [t.to(self.device) for t in batch['pred']]
+                origin_list  = [o.to(self.device) for o in batch['origin']]
+
                 for obs, obs_rel, target, origin in zip(
                     obs_list, obs_rel_list, target_list, origin_list
                 ):
                     n_peds = obs.shape[0]
- 
-                    # Model returns [K, N, pred_len, 2] in normalised frame.
+                    
+                    # 1. Forward pass
                     preds_norm = self.model(obs, obs_rel, k=self.k)  # [K, N, T, 2]
- 
-                    # Convert to world coordinates — single reconstruction path.
-                    # reconstruct_abs broadcasts origin [N, 1, 2] across K and T.
+
+                    # 2. Reconstruct World Coordinates
+                    # Result: [K, N, T, 2] in meters
                     preds_abs = SocialDataset.reconstruct_abs(preds_norm, origin)
- 
-                    # Accumulate sum of per-pedestrian min errors.
-                    # calculate_best_of_k returns the mean over N — multiply
-                    # back by N to get the sum, which we accumulate across scenes.
-                    ade_sum += calculate_best_of_k(preds_abs, target, 'ade').item() * n_peds
-                    fde_sum += calculate_best_of_k(preds_abs, target, 'fde').item() * n_peds
+
+                    # 3. Accuracy Metrics (ADE/FDE)
+                    # We use calculate_best_of_k which returns the mean over N
+                    metrics_sum['ADE'] += calculate_best_of_k(preds_abs, target, 'ade').item() * n_peds
+                    metrics_sum['FDE'] += calculate_best_of_k(preds_abs, target, 'fde').item() * n_peds
+
+                    # 4. Social Metrics (CR/PSV)
+                    # These require a single "best" scene. We pick the best sample per agent.
+                    # We identify the index k in [0, K-1] that minimizes ADE for each pedestrian.
+                    # dist: [K, N, T] -> [K, N] (mean over time)
+                    dist = torch.norm(preds_abs - target.unsqueeze(0), p=2, dim=-1).mean(dim=-1)
+                    best_indices = dist.argmin(dim=0) # [N]
+                    
+                    # Construct the "Best" predicted scene [N, T, 2]
+                    best_scene = torch.stack([preds_abs[best_indices[i], i] for i in range(n_peds)])
+                    
+                    metrics_sum['CR']  += calculate_collision_rate(best_scene) * n_peds
+                    metrics_sum['PSV'] += calculate_psv(best_scene) * n_peds
+
+                    # 5. Uncertainty/Distribution Metrics (AMD/AMV)
+                    # These use the full [K, N, T, 2] distribution
+                    amd, amv = calculate_distribution_metrics(preds_abs)
+                    metrics_sum['AMD'] += amd * n_peds
+                    metrics_sum['AMV'] += amv * n_peds
+
                     ped_count += n_peds
+
+        # Weighted average over all pedestrians
+        return {k: v / ped_count for k, v in metrics_sum.items()}
+    # def evaluate(self, data_loader) -> dict:
+    #     """
+    #     Run evaluation over a full test DataLoader.
  
-        return {
-            'ADE': ade_sum / ped_count,
-            'FDE': fde_sum / ped_count,
-        }
+    #     Metrics are averaged over pedestrians (not over scenes or batches).
+    #     Specifically, we accumulate the sum of per-pedestrian minimum errors
+    #     and the total pedestrian count across the entire test set, then divide
+    #     once at the end.  This matches the benchmark convention — reporting an
+    #     average over all 1,536 ETH-UCY pedestrians, not an average of
+    #     per-scene averages.
+ 
+    #     Returns
+    #     -------
+    #     dict with keys 'ADE' and 'FDE' (float scalars).
+    #     """
+    #     self.model.eval()
+ 
+    #     # Accumulate sum of per-pedestrian min errors and total ped count.
+    #     # Dividing sum/count gives the correctly weighted mean regardless of
+    #     # how many pedestrians appear in each scene or batch.
+    #     ade_sum   = 0.0
+    #     fde_sum   = 0.0
+    #     ped_count = 0
+ 
+    #     with torch.no_grad():
+    #         for batch in data_loader:
+    #             obs_list    = [o.to(self.device)    for o in batch['obs']]
+    #             obs_rel_list = [r.to(self.device)   for r in batch['obs_rel']]
+    #             target_list = [t.to(self.device)    for t in batch['pred']]
+    #             origin_list = [o.to(self.device)    for o in batch['origin']]
+ 
+    #             # Forward pass — one scene at a time (variable N_peds per scene).
+    #             for obs, obs_rel, target, origin in zip(
+    #                 obs_list, obs_rel_list, target_list, origin_list
+    #             ):
+    #                 n_peds = obs.shape[0]
+ 
+    #                 # Model returns [K, N, pred_len, 2] in normalised frame.
+    #                 preds_norm = self.model(obs, obs_rel, k=self.k)  # [K, N, T, 2]
+ 
+    #                 # Convert to world coordinates — single reconstruction path.
+    #                 # reconstruct_abs broadcasts origin [N, 1, 2] across K and T.
+    #                 preds_abs = SocialDataset.reconstruct_abs(preds_norm, origin)
+ 
+    #                 # Accumulate sum of per-pedestrian min errors.
+    #                 # calculate_best_of_k returns the mean over N — multiply
+    #                 # back by N to get the sum, which we accumulate across scenes.
+    #                 ade_sum += calculate_best_of_k(preds_abs, target, 'ade').item() * n_peds
+    #                 fde_sum += calculate_best_of_k(preds_abs, target, 'fde').item() * n_peds
+    #                 ped_count += n_peds
+ 
+    #     return {
+    #         'ADE': ade_sum / ped_count,
+    #         'FDE': fde_sum / ped_count,
+    #     }

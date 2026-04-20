@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 
 def displacement_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -118,3 +119,71 @@ def calculate_best_of_k(
     min_errors, _ = errors.min(dim=0)
 
     return min_errors.mean()
+
+
+def calculate_collision_rate(preds, threshold=0.1):
+    """
+    CR: Percentage of frames where any two agents are closer than 'threshold'.
+    preds: [N, T, 2] (Absolute world coordinates)
+    """
+    N, T, _ = preds.shape
+    if N < 2: return 0.0
+    
+    collisions = 0
+    total_ped_frames = N * T
+    
+    for t in range(T):
+        pos = preds[:, t, :] # [N, 2]
+        dist_matrix = torch.cdist(pos, pos) # [N, N]
+        # Ignore self-distance by adding large value to diagonal
+        dist_matrix += torch.eye(N, device=pos.device) * 10
+        collisions += (dist_matrix < threshold).sum().item()
+    
+    return collisions / (N * (N-1) * T) # Normalized by possible pairs
+
+
+def calculate_psv(preds, radius=0.45):
+    """
+    PSV: Average number of pedestrians violating the social 'proxemic' bubble.
+    """
+    N, T, _ = preds.shape
+    if N < 2: return 0.0
+    
+    violations = 0
+    for t in range(T):
+        dist_matrix = torch.cdist(preds[:, t, :], preds[:, t, :])
+        dist_matrix += torch.eye(N, device=preds.device) * 10
+        violations += (dist_matrix < radius).any(dim=1).sum().item()
+        
+    return violations / (N * T)
+
+
+def calculate_distribution_metrics(preds_k):
+    """
+    AMD & AMV: Evaluate the uncertainty/spread of the K samples.
+    preds_k: [K, N, T, 2]
+    """
+    K, N, T, _ = preds_k.shape
+    # Flatten N and T to treat all predicted points as a distribution per sample
+    # or calculate per timestep. Standard practice is per-timestep average.
+    
+    means = preds_k.mean(dim=0) # [N, T, 2]
+    all_amd = []
+    all_amv = []
+    
+    for n in range(N):
+        for t in range(T):
+            sample_points = preds_k[:, n, t, :] # [K, 2]
+            diff = sample_points - means[n, t]
+            cov = (diff.T @ diff) / (K - 1) + torch.eye(2, device=preds_k.device) * 1e-6
+            
+            # AMD: Mahalanobis distance of samples from their own mean
+            inv_cov = torch.inverse(cov)
+            md = torch.sqrt(torch.diag(diff @ inv_cov @ diff.T))
+            all_amd.append(md.mean().item())
+            
+            # AMV: Max eigenvalue of the covariance (direction of max uncertainty)
+            eigvals = torch.linalg.eigvalsh(cov)
+            all_amv.append(eigvals.max().item())
+            
+    return np.mean(all_amd), np.mean(all_amv)
